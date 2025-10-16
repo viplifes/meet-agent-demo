@@ -1,5 +1,6 @@
 import { AgentDispatchClient } from 'livekit-server-sdk';
 import {
+  JobRequest,
   WorkerOptions,
   cli,
 } from '@livekit/agents';
@@ -27,5 +28,18 @@ setTimeout(createExplicitDispatch, 3000);
 
 cli.runApp(new WorkerOptions({
   agentName: process.env.LIVEKIT_AGENT_NAME ?? "test-ai-agent",
-  agent: join(__dirname, 'realtime_agent.ts')
+  agent: join(__dirname, 'realtime_agent.ts'),
+  requestFunc: async (req: JobRequest) => {
+
+    const attributes: Record<string, string> = {};
+    attributes['userId'] = '0';
+    attributes['userAvatar'] = 'https://picsum.photos/200';
+    // accept the job request
+    await req.accept(
+      process.env.LIVEKIT_AGENT_NAME, // name
+      '', // identity
+      '', // metadata
+      attributes
+    );
+  },
 }));
