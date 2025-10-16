@@ -1,87 +1,40 @@
-import {
-  type JobContext,
-  type JobProcess,
-  defineAgent,
-  llm,
-  voice,
-} from '@livekit/agents';
+import { type JobContext, defineAgent, metrics, voice } from '@livekit/agents';
+import * as bey from '@livekit/agents-plugin-bey';
 import * as openai from '@livekit/agents-plugin-openai';
-import * as silero from '@livekit/agents-plugin-silero';
-import * as anam from '@livekit/agents-plugin-anam';
-import { z } from 'zod';
-
-const roomNameSchema = z.enum(['bedroom', 'living room', 'kitchen', 'bathroom', 'office']);
 
 export default defineAgent({
-  prewarm: async (proc: JobProcess) => {
-    proc.userData.vad = await silero.VAD.load();
-  },
   entry: async (ctx: JobContext) => {
-
-
-    const getWeather = llm.tool({
-      description: ' Called when the user asks about the weather.',
-      parameters: z.object({
-        location: z.string().describe('The location to get the weather for'),
-      }),
-      execute: async ({ location }) => {
-        return `The weather in ${location} is sunny today.`;
-      },
-    });
-
-    const toggleLight = llm.tool({
-      description: 'Called when the user asks to turn on or off the light.',
-      parameters: z.object({
-        room: roomNameSchema.describe('The room to turn the light in'),
-        switchTo: z.enum(['on', 'off']).describe('The state to turn the light to'),
-      }),
-      execute: async ({ room, switchTo }) => {
-        return `The light in the ${room} is now ${switchTo}.`;
-      },
-    });
-
     const agent = new voice.Agent({
-      instructions:
-        "You are a helpful assistant created by LiveKit, always speaking English, you can hear the user's message and respond to it.",
-      tools: {
-        getWeather,
-        toggleLight,
-      },
+      instructions: 'You are a helpful assistant. Speak clearly and concisely.',
     });
 
     const session = new voice.AgentSession({
-      // llm: new openai.realtime.RealtimeModel(),
-      llm: new openai.realtime.RealtimeModel(),
-      // enable to allow chaining of tool calls
-      voiceOptions: {
-        maxToolSteps: 5,
-      },
+      llm: new openai.realtime.RealtimeModel({
+        voice: 'alloy',
+      }),
     });
+
+    await ctx.connect();
 
     await session.start({
       agent,
       room: ctx.room,
     });
 
+    const avatarId = process.env.BEY_AVATAR_ID;
 
-    // Join the LiveKit room first (ensures room name and identity available)
-    await ctx.connect();
-
-    // Configure the Anam avatar persona (requires avatarId)
-    const personaName = process.env.ANAM_PERSONA_NAME ?? 'Agent';
-    const avatarId = process.env.ANAM_AVATAR_ID;
-    if (!avatarId) {
-      throw new Error('ANAM_AVATAR_ID is required');
-    }
-
-    // Start the Anam avatar session and route Agent audio to the avatar
-    const avatar = new anam.AvatarSession({
-      personaConfig: { name: personaName, avatarId },
-      apiUrl: process.env.ANAM_API_URL,
+    const avatar = new bey.AvatarSession({
+      avatarId: avatarId || undefined,
     });
     await avatar.start(session, ctx.room);
 
-    // With Realtime LLM, generateReply will synthesize audio via the model
+    const usageCollector = new metrics.UsageCollector();
+
+    session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
+      metrics.logMetrics(ev.metrics);
+      usageCollector.collect(ev.metrics);
+    });
+
     session.generateReply({
       instructions: 'Greet the user briefly and confirm you are ready.',
     });
