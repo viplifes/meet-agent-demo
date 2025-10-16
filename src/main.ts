@@ -28,7 +28,10 @@ setTimeout(createExplicitDispatch, 3000);
 
 cli.runApp(new WorkerOptions({
   agentName: process.env.LIVEKIT_AGENT_NAME ?? "test-ai-agent",
-  agent: join(__dirname, 'realtime_agent.ts'),
+
+  // agent: join(__dirname, 'realtime_agent.ts'),
+  agent: join(__dirname, 'video_agent.ts'),
+
   requestFunc: async (req: JobRequest) => {
 
     const attributes: Record<string, string> = {};
