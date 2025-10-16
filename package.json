@@ -1,0 +1,23 @@
+{
+  "name": "meet-agents",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "dotenv -e .env -- tsx src/main.ts start",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.5",
+    "dotenv-cli": "^10.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@livekit/agents": "^1.0.11",
+    "@livekit/agents-plugin-openai": "^1.0.11",
+    "@livekit/agents-plugin-silero": "^1.0.11",
+    "livekit-server-sdk": "^2.14.0",
+    "zod": "^3.25.76"
+  }
+}
