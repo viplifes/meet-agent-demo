@@ -1,0 +1,1 @@
+export { STT, type STTOptions } from './stt';
