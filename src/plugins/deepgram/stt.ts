@@ -14,10 +14,10 @@ import {
 } from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
 import { WebSocket } from 'ws';
-import { PeriodicCollector } from './_utils';
-import type { STTLanguages, STTModels } from './models';
+import { PeriodicCollector } from './_utils.js';
+import type { STTLanguages, STTModels } from './models.js';
 
-const API_BASE_URL_V1 = 'wss://api.deepgram.com/v1/listen';
+const API_BASE_URL = 'wss://api.deepgram.com/v1/listen';
 
 export interface STTOptions {
     apiKey?: string;
@@ -146,75 +146,98 @@ export class SpeechStream extends stt.SpeechStream {
         );
     }
 
+    private _createWs(): WebSocket {
+        const streamURL = new URL(API_BASE_URL);
+        const params = {
+            model: this.#opts.model,
+            punctuate: this.#opts.punctuate,
+            smart_format: this.#opts.smartFormat,
+            dictation: this.#opts.dictation,
+            diarize: this.#opts.diarize,
+            numerals: this.#opts.numerals,
+            no_delay: this.#opts.noDelay,
+            interim_results: this.#opts.interimResults,
+            encoding: 'linear16',
+            vad_events: true,
+            sample_rate: this.#opts.sampleRate,
+            channels: this.#opts.numChannels,
+            endpointing: this.#opts.endpointing || false,
+            filler_words: this.#opts.fillerWords,
+            keywords: this.#opts.keywords.map((x) => x.join(':')),
+            keyterm: this.#opts.keyterm,
+            profanity_filter: this.#opts.profanityFilter,
+            language: this.#opts.language,
+            mip_opt_out: this.#opts.mipOptOut,
+        };
+        Object.entries(params).forEach(([k, v]) => {
+            if (v !== undefined) {
+                if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+                    streamURL.searchParams.append(k, encodeURIComponent(v));
+                } else {
+                    v.forEach((x) => streamURL.searchParams.append(k, encodeURIComponent(x)));
+                }
+            }
+        });
+        return new WebSocket(streamURL, {
+            headers: { Authorization: `Token ${this.#opts.apiKey}` },
+        })
+    }
+
     protected async run() {
-        const maxRetry = 32;
+        const retryDelaysMs = [0, 100, 300, 500, 800, 1000, 2000];
+        const maxRetry = 10032;
         let retries = 0;
-        let ws: WebSocket;
 
         while (!this.input.closed && !this.closed) {
-            const streamURL = new URL(API_BASE_URL_V1);
-            const params = {
-                model: this.#opts.model,
-                punctuate: this.#opts.punctuate,
-                smart_format: this.#opts.smartFormat,
-                dictation: this.#opts.dictation,
-                diarize: this.#opts.diarize,
-                numerals: this.#opts.numerals,
-                no_delay: this.#opts.noDelay,
-                interim_results: this.#opts.interimResults,
-                encoding: 'linear16',
-                vad_events: true,
-                sample_rate: this.#opts.sampleRate,
-                channels: this.#opts.numChannels,
-                endpointing: this.#opts.endpointing || false,
-                filler_words: this.#opts.fillerWords,
-                keywords: this.#opts.keywords.map((x) => x.join(':')),
-                keyterm: this.#opts.keyterm,
-                profanity_filter: this.#opts.profanityFilter,
-                language: this.#opts.language,
-                mip_opt_out: this.#opts.mipOptOut,
-            };
-            Object.entries(params).forEach(([k, v]) => {
-                if (v !== undefined) {
-                    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-                        streamURL.searchParams.append(k, encodeURIComponent(v));
-                    } else {
-                        v.forEach((x) => streamURL.searchParams.append(k, encodeURIComponent(x)));
-                    }
-                }
-            });
-
-            ws = new WebSocket(streamURL, {
-                headers: { Authorization: `Token ${this.#opts.apiKey}` },
-            });
-
+            let ws = this._createWs();
             try {
+
                 await new Promise((resolve, reject) => {
                     ws.on('open', resolve);
                     ws.on('error', (error) => reject(error));
                     ws.on('close', (code) => reject(`WebSocket returned ${code}`));
                 });
 
+                // setTimeout(() => {
+                //     ws.close(1000);
+                // }, 20000);
+
+                ws.on('message', (msg) => {
+                    try {
+                        const data = JSON.parse(msg.toString());
+                        this.#logger.debug('Received message: ' + msg.toString());
+                        this.#processStreamEvent(data);
+                    } catch (err) {
+                        this.#logger.error('Error processing message:', err);
+                    }
+                });
+
                 await this.#runWS(ws);
+
             } catch (e) {
+
                 if (!this.closed && !this.input.closed) {
                     if (retries >= maxRetry) {
-                        throw new Error(`failed to connect to Deepgram after ${retries} attempts: ${e}`);
+                        throw new Error(`failed to connect to websocket after ${retries} attempts: ${e}`);
                     }
-
-                    const delay = Math.min(retries * 5, 10);
+                    const delayMs = retryDelaysMs[Math.min(retries, retryDelaysMs.length - 1)];
                     retries++;
 
                     this.#logger.warn(
-                        `failed to connect to Deepgram, retrying in ${delay} seconds: ${e} (${retries}/${maxRetry})`,
+                        `failed to connect to websocket, retrying in ${delayMs}ms: ${e} (${retries}/${maxRetry})`,
                     );
-                    await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+                    await new Promise((resolve) => setTimeout(resolve, delayMs));
                 } else {
                     this.#logger.warn(
-                        `Deepgram disconnected, connection is closed: ${e} (inputClosed: ${this.input.closed}, isClosed: ${this.closed})`,
+                        `websocket disconnected, connection is closed: ${e} (inputClosed: ${this.input.closed}, isClosed: ${this.closed})`,
                     );
                 }
+
+            } finally {
+                ws.removeAllListeners();
+                ws.close();
             }
+
         }
 
         this.closed = true;
@@ -226,30 +249,26 @@ export class SpeechStream extends stt.SpeechStream {
     }
 
     async #runWS(ws: WebSocket) {
-        this.#resetWS = new Future();
         let closing = false;
 
+
+        // Keepalive ping every 10 seconds
         const keepalive = setInterval(() => {
             try {
                 ws.send(JSON.stringify({ type: 'KeepAlive' }));
             } catch {
+                closing = true;
                 clearInterval(keepalive);
-                return;
             }
-        }, 5000);
+        }, 10000);
 
-        // gets cancelled also when sendTask is complete
-        const wsMonitor = Task.from(async (controller) => {
-            const closed = new Promise<void>(async (_, reject) => {
-                ws.once('close', (code, reason) => {
-                    if (!closing) {
-                        this.#logger.error(`WebSocket closed with code ${code}: ${reason}`);
-                        reject(new Error('WebSocket closed'));
-                    }
-                });
-            });
 
-            await Promise.race([closed, waitForAbort(controller.signal)]);
+        // WSS monitor
+        ws.once('close', (code, reason) => {
+            if (!closing) {
+                this.#logger.error(`WebSocket closed with code ${code}: ${reason}`);
+            }
+            closing = true;
         });
 
         const sendTask = async () => {
@@ -265,10 +284,13 @@ export class SpeechStream extends stt.SpeechStream {
             const abortPromise = waitForAbort(this.abortSignal);
 
             try {
-                while (!this.closed) {
+                while (!this.closed && !closing) {
                     const result = await Promise.race([this.input.next(), abortPromise]);
 
-                    if (result === undefined) return; // aborted
+                    if (!result) {
+                        break;
+                    }
+
                     if (result.done) {
                         break;
                     }
@@ -296,115 +318,107 @@ export class SpeechStream extends stt.SpeechStream {
                         }
                     }
                 }
+            } catch (error) {
+                if (!closing) {
+                    this.#logger.error('Error in send task:', error);
+                }
             } finally {
+                this.#logger.debug('Send task finished, closing WebSocket');
                 closing = true;
-                ws.send(JSON.stringify({ type: 'CloseStream' }));
-                wsMonitor.cancel();
             }
         };
 
-        const listenTask = Task.from(async (controller) => {
-            const putMessage = (message: stt.SpeechEvent) => {
-                if (!this.queue.closed) {
-                    try {
-                        this.queue.put(message);
-                    } catch (e) {
-                        // ignore
+        try {
+            await Promise.race([
+                sendTask(),
+                waitForAbort(this.abortController.signal),
+            ]);
+        } finally {
+            closing = true;
+            ws.close();
+        }
+
+        throw 'stop runWS'
+    }
+
+
+    #processStreamEvent(json: any) {
+        switch (json['type']) {
+            case 'SpeechStarted': {
+                // This is a normal case. Deepgram's SpeechStarted events
+                // are not correlated with speech_final or utterance end.
+                // It's possible that we receive two in a row without an endpoint
+                // It's also possible we receive a transcript without a SpeechStarted event.
+                if (this.#speaking) return;
+                this.#speaking = true;
+                this.putMessage({ type: stt.SpeechEventType.START_OF_SPEECH });
+                break;
+            }
+            // see this page:
+            // https://developers.deepgram.com/docs/understand-endpointing-interim-results#using-endpointing-speech_final
+            // for more information about the different types of events
+            case 'Results': {
+                const metadata = json['metadata'];
+                const requestId = metadata['request_id'];
+                const isFinal = json['is_final'];
+                const isEndpoint = json['speech_final'];
+                this.#requestId = requestId;
+
+                const alternatives = liveTranscriptionToSpeechData(this.#opts.language!, json);
+
+                // If, for some reason, we didn't get a SpeechStarted event but we got
+                // a transcript with text, we should start speaking. It's rare but has
+                // been observed.
+                if (alternatives[0] && alternatives[0].text) {
+                    if (!this.#speaking) {
+                        this.#speaking = true;
+                        this.putMessage({
+                            type: stt.SpeechEventType.START_OF_SPEECH,
+                        });
+                    }
+
+                    if (isFinal) {
+                        this.putMessage({
+                            type: stt.SpeechEventType.FINAL_TRANSCRIPT,
+                            alternatives: [alternatives[0], ...alternatives.slice(1)],
+                        });
+                    } else {
+                        this.putMessage({
+                            type: stt.SpeechEventType.INTERIM_TRANSCRIPT,
+                            alternatives: [alternatives[0], ...alternatives.slice(1)],
+                        });
                     }
                 }
-            };
 
-            const listenMessage = new Promise<void>((resolve, reject) => {
-                ws.on('message', (msg) => {
-                    try {
-                        const json = JSON.parse(msg.toString());
-                        switch (json['type']) {
-                            case 'SpeechStarted': {
-                                // This is a normal case. Deepgram's SpeechStarted events
-                                // are not correlated with speech_final or utterance end.
-                                // It's possible that we receive two in a row without an endpoint
-                                // It's also possible we receive a transcript without a SpeechStarted event.
-                                if (this.#speaking) return;
-                                this.#speaking = true;
-                                putMessage({ type: stt.SpeechEventType.START_OF_SPEECH });
-                                break;
-                            }
-                            // see this page:
-                            // https://developers.deepgram.com/docs/understand-endpointing-interim-results#using-endpointing-speech_final
-                            // for more information about the different types of events
-                            case 'Results': {
-                                const metadata = json['metadata'];
-                                const requestId = metadata['request_id'];
-                                const isFinal = json['is_final'];
-                                const isEndpoint = json['speech_final'];
-                                this.#requestId = requestId;
+                // if we receive an endpoint, only end the speech if
+                // we either had a SpeechStarted event or we have a seen
+                // a non-empty transcript (deepgram doesn't have a SpeechEnded event)
+                if (isEndpoint && this.#speaking) {
+                    this.#speaking = false;
+                    this.putMessage({ type: stt.SpeechEventType.END_OF_SPEECH });
+                }
 
-                                const alternatives = liveTranscriptionToSpeechData(this.#opts.language!, json);
-
-                                // If, for some reason, we didn't get a SpeechStarted event but we got
-                                // a transcript with text, we should start speaking. It's rare but has
-                                // been observed.
-                                if (alternatives[0] && alternatives[0].text) {
-                                    if (!this.#speaking) {
-                                        this.#speaking = true;
-                                        putMessage({
-                                            type: stt.SpeechEventType.START_OF_SPEECH,
-                                        });
-                                    }
-
-                                    if (isFinal) {
-                                        putMessage({
-                                            type: stt.SpeechEventType.FINAL_TRANSCRIPT,
-                                            alternatives: [alternatives[0], ...alternatives.slice(1)],
-                                        });
-                                    } else {
-                                        putMessage({
-                                            type: stt.SpeechEventType.INTERIM_TRANSCRIPT,
-                                            alternatives: [alternatives[0], ...alternatives.slice(1)],
-                                        });
-                                    }
-                                }
-
-                                // if we receive an endpoint, only end the speech if
-                                // we either had a SpeechStarted event or we have a seen
-                                // a non-empty transcript (deepgram doesn't have a SpeechEnded event)
-                                if (isEndpoint && this.#speaking) {
-                                    this.#speaking = false;
-                                    putMessage({ type: stt.SpeechEventType.END_OF_SPEECH });
-                                }
-
-                                break;
-                            }
-                            case 'Metadata': {
-                                break;
-                            }
-                            default: {
-                                this.#logger.child({ msg: json }).warn('received unexpected message from Deepgram');
-                                break;
-                            }
-                        }
-
-                        if (this.closed || closing) {
-                            resolve();
-                        }
-                    } catch (err) {
-                        this.#logger.error(`STT: Error processing message: ${msg}`);
-                        reject(err);
-                    }
-                });
-            });
-
-            await Promise.race([listenMessage, waitForAbort(controller.signal)]);
-        }, this.abortController);
-
-        await Promise.race([
-            this.#resetWS.await,
-            Promise.all([sendTask(), listenTask.result, wsMonitor]),
-        ]);
-        closing = true;
-        ws.close();
-        clearInterval(keepalive);
+                break;
+            }
+            case 'Metadata': {
+                break;
+            }
+            default: {
+                this.#logger.child({ msg: json }).warn('received unexpected message from Deepgram');
+                break;
+            }
+        }
     }
+
+    private putMessage(message: stt.SpeechEvent) {
+        if (!this.queue.closed) {
+            try {
+                this.queue.put(message);
+            } catch (e) {
+                this.#logger.warn('Failed to put message in queue:', e);
+            }
+        }
+    };
 
     private onAudioDurationReport(duration: number) {
         const usageEvent: stt.SpeechEvent = {

@@ -1,14 +1,20 @@
 import {
   type JobContext,
+  type JobProcess,
   defineAgent,
 } from '@livekit/agents';
 import { RoomEvent, TrackKind } from '@livekit/rtc-node';
 import type { RemoteTrack, RemoteParticipant, RemoteTrackPublication } from '@livekit/rtc-node';
-import * as helper from './helper';
-import { SttSession } from './session';
-import { GetProvider } from './providers';
+import * as silero from '@livekit/agents-plugin-silero';
+import * as helper from './helper.js';
+import { SttSession } from './session.js';
+import { GetSttProvider } from '../../providers.js';
 
 export default defineAgent({
+
+  prewarm: async (proc: JobProcess) => {
+    proc.userData.vad = await silero.VAD.load();
+  },
 
   entry: async (ctx: JobContext) => {
 
@@ -32,8 +38,9 @@ export default defineAgent({
     ctx.room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, participant: RemoteParticipant) => {
       if (track && track.kind === TrackKind.KIND_AUDIO) {
         const id = track.sid || participant.identity;
-        console.info(`[stt ${actorId}] track ${id} subscribed to ${participant.name} ${JSON.stringify(participant.attributes)}`);
-        const session = new SttSession(ctx, participant, GetProvider(language), (text: string) => {
+        const provider = GetSttProvider(language);
+        console.info(`[stt ${actorId}] track ${id} subscribed with ${provider.label} to ${participant.name} ${JSON.stringify(participant.attributes)}`);
+        const session = new SttSession(ctx, participant, provider, (text: string) => {
           messages.push({
             userId: participant.attributes["userId"],
             date: Date.now(),

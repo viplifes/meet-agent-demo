@@ -18,12 +18,49 @@ import {
 } from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
 import { WebSocket } from 'ws';
-import { PeriodicCollector } from './_utils';
+import { PeriodicCollector } from './_utils.js';
 
-const API_BASE_URL_V1 = 'https://api.elevenlabs.io/v1';
+const API_BASE_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 const AUTHORIZATION_HEADER = 'xi-api-key';
 
 export type STTRealtimeSampleRates = 8000 | 16000 | 24000 | 44100;
+
+export interface STTOptions {
+    /**
+     * ElevenLabs API key. Can be set via argument or ELEVEN_API_KEY environment variable.
+     */
+    apiKey?: string;
+
+    /**
+     * Language code for the STT model (e.g., 'en', 'es', 'fr').
+     */
+    languageCode?: string;
+
+    /**
+     * Whether to tag audio events like (laughter), (footsteps), etc. in the transcription.
+     * Only supported for Scribe v1 model.
+     * @default true
+     */
+    tagAudioEvents?: boolean;
+
+    /**
+     * Audio sample rate in Hz.
+     * @default 16000
+     */
+    sampleRate?: STTRealtimeSampleRates;
+
+    /**
+     * Server-side VAD options. Only supported for Scribe v2 realtime model.
+     */
+    serverVad?: VADOptions;
+
+    /**
+     * Whether to include word-level timestamps in the transcription.
+     * @default false
+     */
+    includeTimestamps?: boolean;
+}
+
 
 export interface VADOptions {
     /**
@@ -51,62 +88,13 @@ export interface VADOptions {
     minSilenceDurationMs?: number;
 }
 
-export interface STTOptions {
-    /**
-     * ElevenLabs API key. Can be set via argument or ELEVEN_API_KEY environment variable.
-     */
-    apiKey?: string;
-
-    /**
-     * Custom base URL for the API.
-     * @default 'https://api.elevenlabs.io/v1'
-     */
-    baseUrl?: string;
-
-    /**
-     * Language code for the STT model (e.g., 'en', 'es', 'fr').
-     */
-    languageCode?: string;
-
-    /**
-     * Whether to tag audio events like (laughter), (footsteps), etc. in the transcription.
-     * Only supported for Scribe v1 model.
-     * @default true
-     */
-    tagAudioEvents?: boolean;
-
-    /**
-     * Whether to use "scribe_v2_realtime" model for streaming mode.
-     * @default false
-     */
-    useRealtime?: boolean;
-
-    /**
-     * Audio sample rate in Hz.
-     * @default 16000
-     */
-    sampleRate?: STTRealtimeSampleRates;
-
-    /**
-     * Server-side VAD options. Only supported for Scribe v2 realtime model.
-     */
-    serverVad?: VADOptions;
-
-    /**
-     * Whether to include word-level timestamps in the transcription.
-     * @default false
-     */
-    includeTimestamps?: boolean;
-}
 
 const defaultSTTOptions: Required<Omit<STTOptions, 'serverVad'>> & {
     serverVad?: VADOptions;
 } = {
     apiKey: process.env.ELEVEN_API_KEY || '',
-    baseUrl: API_BASE_URL_V1,
     languageCode: 'en',
     tagAudioEvents: true,
-    useRealtime: false,
     sampleRate: 16000,
     includeTimestamps: false,
 };
@@ -115,13 +103,14 @@ export class STT extends stt.STT {
     #opts: Required<Omit<STTOptions, 'serverVad'>> & { serverVad?: VADOptions };
     #logger = log();
     label = 'elevenlabs.STT';
+    private abortController = new AbortController();
 
     constructor(opts: STTOptions = {}) {
         const mergedOpts = { ...defaultSTTOptions, ...opts };
 
         super({
-            streaming: mergedOpts.useRealtime,
-            interimResults: mergedOpts.useRealtime,
+            streaming: true,
+            interimResults: true,
         });
 
         if (!mergedOpts.apiKey) {
@@ -130,133 +119,24 @@ export class STT extends stt.STT {
             );
         }
 
-        if (!mergedOpts.useRealtime && opts.serverVad !== undefined) {
-            this.#logger.warn('Server-side VAD is only supported for Scribe v2 realtime model');
-        }
-
         this.#opts = mergedOpts;
     }
 
-    get model(): string {
-        return this.#opts.useRealtime ? 'Scribe v2 Realtime' : 'Scribe v1';
-    }
-
-    get provider(): string {
-        return 'ElevenLabs';
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async _recognize(_: AudioBuffer): Promise<stt.SpeechEvent> {
+        throw new Error('Recognize is not supported on STT');
     }
 
     updateOptions(opts: Partial<STTOptions>) {
         this.#opts = { ...this.#opts, ...opts };
     }
 
-    async _recognize(buffer: AudioBuffer, abortSignal?: AbortSignal): Promise<stt.SpeechEvent> {
-        if (this.#opts.useRealtime) {
-            throw new Error('Recognize is not supported when using realtime model. Use stream() instead.');
-        }
-
-        // Convert audio buffer to WAV format
-        const mergedFrame = mergeFrames(buffer);
-        const wavBuffer = this.#createWav(mergedFrame);
-
-        const formData = new FormData();
-        const wavBlob = new Blob([new Uint8Array(wavBuffer)], { type: 'audio/wav' });
-        formData.append('file', wavBlob, 'audio.wav');
-        formData.append('model_id', 'scribe_v1');
-        formData.append('tag_audio_events', String(this.#opts.tagAudioEvents));
-
-        if (this.#opts.languageCode) {
-            formData.append('language_code', this.#opts.languageCode);
-        }
-
-        try {
-            const response = await fetch(`${this.#opts.baseUrl}/speech-to-text`, {
-                method: 'POST',
-                headers: {
-                    [AUTHORIZATION_HEADER]: this.#opts.apiKey,
-                },
-                body: formData,
-                signal: abortSignal,
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({}));
-                throw new Error(
-                    `ElevenLabs API error (${response.status}): ${errorData.detail || 'Unknown error'}`,
-                );
-            }
-
-            const result = await response.json();
-            return this.#transcriptionToSpeechEvent(result);
-        } catch (error) {
-            if (error instanceof Error && error.name === 'AbortError') {
-                throw new Error('Request aborted');
-            }
-            throw error;
-        }
-    }
-
     stream(options?: { connOptions?: APIConnectOptions }): SpeechStream {
-        if (!this.#opts.useRealtime) {
-            throw new Error('Streaming is only supported with useRealtime: true');
-        }
-
         return new SpeechStream(this, this.#opts, options?.connOptions);
     }
 
-    #createWav(frame: AudioFrame): Buffer {
-        const bitsPerSample = 16;
-        const byteRate = (frame.sampleRate * frame.channels * bitsPerSample) / 8;
-        const blockAlign = (frame.channels * bitsPerSample) / 8;
-
-        const header = Buffer.alloc(44);
-        header.write('RIFF', 0);
-        header.writeUInt32LE(36 + frame.data.byteLength, 4);
-        header.write('WAVE', 8);
-        header.write('fmt ', 12);
-        header.writeUInt32LE(16, 16);
-        header.writeUInt16LE(1, 20);
-        header.writeUInt16LE(frame.channels, 22);
-        header.writeUInt32LE(frame.sampleRate, 24);
-        header.writeUInt32LE(byteRate, 28);
-        header.writeUInt16LE(blockAlign, 32);
-        header.writeUInt16LE(16, 34);
-        header.write('data', 36);
-        header.writeUInt32LE(frame.data.byteLength, 40);
-
-        return Buffer.concat([header, Buffer.from(frame.data.buffer)]);
-    }
-
-    #transcriptionToSpeechEvent(result: {
-        text?: string;
-        language_code?: string;
-        words?: Array<{ text?: string; start?: number; end?: number; speaker_id?: string }>;
-    }): stt.SpeechEvent {
-        const text = result.text || '';
-        const language = result.language_code || this.#opts.languageCode;
-        const words = result.words || [];
-
-        let startTime = 0;
-        let endTime = 0;
-        let speakerId: string | undefined;
-
-        if (words.length > 0) {
-            speakerId = words[0].speaker_id;
-            startTime = Math.min(...words.map((w) => w.start || 0));
-            endTime = Math.max(...words.map((w) => w.end || 0));
-        }
-
-        return {
-            type: stt.SpeechEventType.FINAL_TRANSCRIPT,
-            alternatives: [
-                {
-                    text,
-                    language: language || '',
-                    startTime,
-                    endTime,
-                    confidence: 1.0,
-                },
-            ],
-        };
+    async close() {
+        this.abortController.abort();
     }
 }
 
@@ -268,7 +148,6 @@ export class SpeechStream extends stt.SpeechStream {
     #resetWS = new Future();
     #requestId = '';
     #audioDurationCollector: PeriodicCollector<number>;
-    #sessionId?: string;
     label = 'elevenlabs.SpeechStream';
 
     constructor(
@@ -287,40 +166,91 @@ export class SpeechStream extends stt.SpeechStream {
     }
 
 
+    private _createWs(): WebSocket {
+        const streamURL = new URL(API_BASE_URL);
+        const params = {
+            model_id: 'scribe_v2_realtime',
+            encoding: `pcm_${this.#opts.sampleRate}`,
+            commit_strategy: 'vad',
+            vad_silence_threshold_secs: this.#opts.serverVad?.vadSilenceThresholdSecs,
+            vad_threshold: this.#opts.serverVad?.vadThreshold,
+            minSpeechDurationMs: this.#opts.serverVad?.minSpeechDurationMs,
+            minSilenceDurationMs: this.#opts.serverVad?.minSilenceDurationMs,
+            language_code: this.#opts.languageCode,
+            include_timestamps: this.#opts.includeTimestamps,
+        };
+        Object.entries(params).forEach(([k, v]) => {
+            if (v !== undefined) {
+                if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+                    streamURL.searchParams.append(k, encodeURIComponent(v));
+                } else {
+                    //  v.forEach((x) => streamURL.searchParams.append(k, encodeURIComponent(x)));
+                }
+            }
+        });
+        this.#logger.debug('Building WebSocket URL: ' + streamURL);
+        return new WebSocket(streamURL, {
+            headers: {
+                [AUTHORIZATION_HEADER]: this.#opts.apiKey,
+            },
+        })
+    }
 
     protected async run() {
-        this.#logger.info('ElevenLabs STT stream starting...');
-        const maxRetry = 32;
+        const retryDelaysMs = [0, 100, 300, 500, 800, 1000, 2000];
+        const maxRetry = 10032;
         let retries = 0;
-        let ws: WebSocket;
 
         while (!this.input.closed && !this.closed) {
+            let ws = this._createWs();
             try {
-                this.#logger.debug('Attempting to connect to ElevenLabs WebSocket...');
-                ws = await this.#connectWS();
-                this.#logger.info('Successfully connected to ElevenLabs WebSocket');
+
+                await new Promise((resolve, reject) => {
+                    ws.on('open', resolve);
+                    ws.on('error', (error) => reject(error));
+                    ws.on('close', (code) => reject(`WebSocket returned ${code}`));
+                });
+
+                // setTimeout(() => {
+                //     ws.close(1000);
+                // }, 20000);
+
+                ws.on('message', (msg) => {
+                    try {
+                        const data = JSON.parse(msg.toString());
+                        this.#logger.debug('Received message: ' + msg.toString());
+                        this.#processStreamEvent(data);
+                    } catch (err) {
+                        this.#logger.error('Error processing message:', err);
+                    }
+                });
+
                 await this.#runWS(ws);
+
             } catch (e) {
-                this.#logger.error('Error in ElevenLabs STT stream:', e);
 
                 if (!this.closed && !this.input.closed) {
                     if (retries >= maxRetry) {
-                        throw new Error(`Failed to connect to ElevenLabs after ${retries} attempts: ${e}`);
+                        throw new Error(`failed to connect to websocket after ${retries} attempts: ${e}`);
                     }
-
-                    const delay = Math.min(retries * 5, 10);
+                    const delayMs = retryDelaysMs[Math.min(retries, retryDelaysMs.length - 1)];
                     retries++;
 
                     this.#logger.warn(
-                        `Failed to connect to ElevenLabs, retrying in ${delay} seconds: ${e} (${retries}/${maxRetry})`,
+                        `failed to connect to websocket, retrying in ${delayMs}ms: ${e} (${retries}/${maxRetry})`,
                     );
-                    await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+                    await new Promise((resolve) => setTimeout(resolve, delayMs));
                 } else {
                     this.#logger.warn(
-                        `ElevenLabs disconnected, connection is closed: ${e} (inputClosed: ${this.input.closed}, isClosed: ${this.closed})`,
+                        `websocket disconnected, connection is closed: ${e} (inputClosed: ${this.input.closed}, isClosed: ${this.closed})`,
                     );
                 }
+
+            } finally {
+                ws.removeAllListeners();
+                ws.close();
             }
+
         }
 
         this.closed = true;
@@ -331,140 +261,33 @@ export class SpeechStream extends stt.SpeechStream {
         this.#resetWS.resolve();
     }
 
-    async #connectWS(): Promise<WebSocket> {
-        this.#logger.debug('Building WebSocket URL...');
-        const commitStrategy = this.#opts.serverVad ? 'vad' : 'manual';
-        const params = new URLSearchParams({
-            model_id: 'scribe_v2_realtime',
-            encoding: `pcm_${this.#opts.sampleRate}`,
-            commit_strategy: commitStrategy,
-        });
-
-        this.#logger.info({
-            model_id: 'scribe_v2_realtime',
-            encoding: `pcm_${this.#opts.sampleRate}`,
-            commit_strategy: commitStrategy,
-            has_serverVad: !!this.#opts.serverVad,
-        }, 'Connection params');
-
-        // Add server VAD options if provided
-        if (this.#opts.serverVad) {
-            const vad = this.#opts.serverVad;
-            this.#logger.info({ vad }, 'Adding server VAD options');
-            if (vad.vadSilenceThresholdSecs !== undefined) {
-                params.append('vad_silence_threshold_secs', String(vad.vadSilenceThresholdSecs));
-            }
-            if (vad.vadThreshold !== undefined) {
-                params.append('vad_threshold', String(vad.vadThreshold));
-            }
-            if (vad.minSpeechDurationMs !== undefined) {
-                params.append('min_speech_duration_ms', String(vad.minSpeechDurationMs));
-            }
-            if (vad.minSilenceDurationMs !== undefined) {
-                params.append('min_silence_duration_ms', String(vad.minSilenceDurationMs));
-            }
-        }
-
-        if (this.#opts.languageCode) {
-            params.append('language_code', this.#opts.languageCode);
-        }
-
-        if (this.#opts.includeTimestamps) {
-            params.append('include_timestamps', 'true');
-        }
-
-        // Convert HTTP URL to WSS
-        const baseUrl = this.#opts.baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
-        const wsUrl = `${baseUrl}/speech-to-text/realtime?${params.toString()}`;
-
-        const maskedUrl = wsUrl.replace(this.#opts.apiKey, '***');
-        const allParams = Object.fromEntries(params.entries());
-
-        this.#logger.info({ url: maskedUrl }, 'Full WebSocket URL');
-        this.#logger.info({ params: allParams }, 'All URL params');
-
-        return new Promise((resolve, reject) => {
-            // Access private _connOptions from parent class
-            const connOptions = (this as any)._connOptions as APIConnectOptions | undefined;
-
-            const ws = new WebSocket(wsUrl, {
-                headers: {
-                    [AUTHORIZATION_HEADER]: this.#opts.apiKey,
-                },
-            });
-
-            const timeout = setTimeout(() => {
-                this.#logger.error('WebSocket connection timeout');
-                ws.close();
-                reject(new Error('WebSocket connection timeout'));
-            }, connOptions?.timeoutMs || 10000);
-
-            ws.on('open', () => {
-                this.#logger.debug('WebSocket opened successfully');
-                clearTimeout(timeout);
-                resolve(ws);
-            });
-
-            ws.on('error', (error) => {
-                this.#logger.error('WebSocket connection error:', error);
-                clearTimeout(timeout);
-                reject(error);
-            });
-        });
-    }
-
     async #runWS(ws: WebSocket) {
-        this.#resetWS = new Future();
+
         let closing = false;
 
-        // Keepalive ping every 30 seconds
+
+        // Keepalive ping every 10 seconds
         const keepalive = setInterval(() => {
             try {
                 ws.ping();
             } catch {
+                closing = true;
                 clearInterval(keepalive);
             }
-        }, 30000);
+        }, 10000);
 
-        const wsMonitor = Task.from(async (controller) => {
-            const closed = new Promise<void>((_, reject) => {
-                ws.once('close', (code, reason) => {
-                    if (!closing) {
-                        // Код 1000 = нормальное закрытие (например, timeout при отсутствии данных)
-                        if (code === 1000) {
-                            this.#logger.warn(
-                                `WebSocket closed normally (code ${code}): ${reason || 'no reason'}. This usually means no audio was sent for a while.`,
-                            );
-                            // Возвращаем ошибку чтобы запустить retry logic
-                            reject(new Error('WebSocket timeout'));
-                        } else {
-                            this.#logger.error(`WebSocket closed unexpectedly with code ${code}: ${reason}`);
-                            reject(new Error(`WebSocket closed with code ${code}: ${reason}`));
-                        }
-                    } else {
-                        this.#logger.info('WebSocket closed gracefully');
-                    }
-                });
 
-                ws.once('error', (error) => {
-                    if (!closing) {
-                        this.#logger.error('WebSocket error:', error);
-                        reject(error);
-                    }
-                });
-            });
-
-            try {
-                await Promise.race([closed, waitForAbort(controller.signal)]);
-            } catch (error) {
-                if (!closing) {
-                    this.#logger.error('WebSocket monitor caught error:', error);
-                    throw error;
-                }
+        // WSS monitor
+        ws.once('close', (code, reason) => {
+            if (!closing) {
+                this.#logger.error(`WebSocket closed with code ${code}: ${reason}`);
             }
+            closing = true;
         });
 
+        // WSS send data
         const sendTask = async () => {
+
             const samples100Ms = Math.floor(this.#opts.sampleRate / 10);
             const stream = new AudioByteStream(
                 this.#opts.sampleRate,
@@ -477,15 +300,20 @@ export class SpeechStream extends stt.SpeechStream {
             const abortPromise = waitForAbort(this.abortSignal);
 
             try {
-                while (!this.closed) {
+                while (!this.closed && !closing) {
+
                     const result = await Promise.race([this.input.next(), abortPromise]);
 
-                    if (result === undefined) return; // aborted
+                    if (!result) {
+                        break;
+                    }
+
                     if (result.done) {
                         break;
                     }
 
                     const data = result.value;
+                    // console.log('data', retries, data === SpeechStream.FLUSH_SENTINEL);
 
                     let frames: AudioFrame[];
                     if (data === SpeechStream.FLUSH_SENTINEL) {
@@ -512,7 +340,7 @@ export class SpeechStream extends stt.SpeechStream {
                                 sample_rate: this.#opts.sampleRate,
                             }),
                         );
-                        //  }
+                        // }
                     }
                 }
             } catch (error) {
@@ -522,57 +350,22 @@ export class SpeechStream extends stt.SpeechStream {
             } finally {
                 this.#logger.debug('Send task finished, closing WebSocket');
                 closing = true;
-                wsMonitor.cancel();
             }
         };
 
-        const listenTask = Task.from(async (controller) => {
-            const putMessage = (message: stt.SpeechEvent) => {
-                if (!this.queue.closed) {
-                    try {
-                        this.queue.put(message);
-                    } catch (e) {
-                        this.#logger.warn('Failed to put message in queue:', e);
-                    }
-                }
-            };
 
-            const listenMessage = new Promise<void>((resolve, reject) => {
-                ws.on('message', (msg) => {
-                    try {
-                        const data = JSON.parse(msg.toString());
-                        this.#logger.debug('Received message: ' + msg.toString());
-                        this.#processStreamEvent(data, putMessage);
+        try {
+            await Promise.race([
+                sendTask(),
+                waitForAbort(this.abortController.signal),
+            ]);
+        } finally {
+            closing = true;
+            ws.close();
+        }
 
-                        if (this.closed || closing) {
-                            this.#logger.debug('Stream closed, resolving listen task');
-                            resolve();
-                        }
-                    } catch (err) {
-                        this.#logger.error('Error processing message:', err);
-                        reject(err);
-                    }
-                });
-            });
+        throw 'stop runWS'
 
-            try {
-                await Promise.race([listenMessage, waitForAbort(controller.signal)]);
-            } catch (error) {
-                if (!closing) {
-                    this.#logger.error('Listen task error:', error);
-                    throw error;
-                }
-            }
-        });
-
-        await Promise.race([
-            this.#resetWS.await,
-            Promise.all([sendTask(), listenTask.result, wsMonitor]),
-        ]);
-
-        closing = true;
-        ws.close();
-        clearInterval(keepalive);
     }
 
     #processStreamEvent(
@@ -583,8 +376,7 @@ export class SpeechStream extends stt.SpeechStream {
             session_id?: string;
             message?: string;
             details?: string;
-        },
-        putMessage: (message: stt.SpeechEvent) => void,
+        }
     ) {
         const messageType = data.message_type;
         const text = data.text || '';
@@ -614,8 +406,6 @@ export class SpeechStream extends stt.SpeechStream {
 
         switch (messageType) {
             case 'session_started':
-                this.#sessionId = data.session_id;
-                this.#logger.info(`ElevenLabs session started with ID: ${this.#sessionId}`);
                 break;
 
             case 'partial_transcript':
@@ -623,11 +413,11 @@ export class SpeechStream extends stt.SpeechStream {
                 if (text) {
                     if (!this.#speaking) {
                         this.#logger.debug('Speech started');
-                        putMessage({ type: stt.SpeechEventType.START_OF_SPEECH });
+                        this.putMessage({ type: stt.SpeechEventType.START_OF_SPEECH });
                         this.#speaking = true;
                     }
 
-                    putMessage({
+                    this.putMessage({
                         type: stt.SpeechEventType.INTERIM_TRANSCRIPT,
                         alternatives: [createSpeechData()],
                     });
@@ -640,11 +430,11 @@ export class SpeechStream extends stt.SpeechStream {
                 if (text) {
                     if (!this.#speaking) {
                         this.#logger.debug('Speech started (from committed)');
-                        putMessage({ type: stt.SpeechEventType.START_OF_SPEECH });
+                        this.putMessage({ type: stt.SpeechEventType.START_OF_SPEECH });
                         this.#speaking = true;
                     }
 
-                    putMessage({
+                    this.putMessage({
                         type: stt.SpeechEventType.FINAL_TRANSCRIPT,
                         alternatives: [createSpeechData()],
                     });
@@ -652,7 +442,7 @@ export class SpeechStream extends stt.SpeechStream {
                     // Empty commit signals end of speech segment
                     if (this.#speaking) {
                         this.#logger.debug('Speech ended');
-                        putMessage({ type: stt.SpeechEventType.END_OF_SPEECH });
+                        this.putMessage({ type: stt.SpeechEventType.END_OF_SPEECH });
                         this.#speaking = false;
                     }
                 }
@@ -680,6 +470,16 @@ export class SpeechStream extends stt.SpeechStream {
                 break;
         }
     }
+
+    private putMessage(message: stt.SpeechEvent) {
+        if (!this.queue.closed) {
+            try {
+                this.queue.put(message);
+            } catch (e) {
+                this.#logger.warn('Failed to put message in queue:', e);
+            }
+        }
+    };
 
     private onAudioDurationReport(duration: number) {
         const usageEvent: stt.SpeechEvent = {

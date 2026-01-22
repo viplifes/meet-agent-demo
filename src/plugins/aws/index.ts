@@ -1,1 +1,1 @@
-export { STT, type STTOptions } from './stt';
+export { STT, type STTOptions } from './stt.js';

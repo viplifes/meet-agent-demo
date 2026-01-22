@@ -38,5 +38,5 @@
  * @module @livekit/agents-plugin-elevenlabs
  */
 
-export { STT, SpeechStream, type STTOptions, type VADOptions } from './stt';
-export { type STTModels, type STTLanguages, type STTRealtimeSampleRates } from './models';
+export { STT, SpeechStream, type STTOptions, type VADOptions } from './stt.js';
+export { type STTModels, type STTLanguages, type STTRealtimeSampleRates } from './models.js';

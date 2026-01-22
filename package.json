@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "start": "dotenv -e .env -- tsx src/main.ts start",
+    "dist": "node --env-file .env dist/main.js dev",
     "build": "tsc"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.5.5",
     "@types/ws": "^8.5.10",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
@@ -16,18 +18,20 @@
     "eslint": "^8.0.0",
     "jest": "^29.0.0",
     "prettier": "^3.0.0",
-    "tsx": "^4.20.6",
+    "tsx": "^4.21.0",
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@aws-sdk/client-transcribe-streaming": "^3.971.0",
+    "@aws-sdk/client-transcribe-streaming": "^3.972.0",
+    "@aws-sdk/credential-providers": "^3.972.0",
     "@livekit/agents": "^1.0.36",
     "@livekit/agents-plugin-bey": "^1.0.36",
     "@livekit/agents-plugin-deepgram": "^1.0.36",
     "@livekit/agents-plugin-openai": "^1.0.36",
     "@livekit/agents-plugin-silero": "^1.0.36",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.1.1",
     "livekit-server-sdk": "^2.15.0",
+    "tslib": "^2.8.1",
     "ws": "^8.19.0",
     "zod": "^3.25.76"
   }

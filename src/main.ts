@@ -13,7 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // const agentFile = join(__dirname, './agents/realtime_agent.ts');
 // const agentFile = join(__dirname, './agents/video_agent.ts');
-const agentFile = join(__dirname, './agents/stt/agent.ts');
+const agentFile = join(__dirname, './agents/stt/agent.js');
 
 
 cli.runApp(new ServerOptions({

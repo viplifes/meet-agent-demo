@@ -4,6 +4,7 @@ import {
   stt,
 } from '@livekit/agents';
 import type { RemoteParticipant } from '@livekit/rtc-node';
+import * as silero from '@livekit/agents-plugin-silero';
 
 
 export class SttSession {
@@ -19,7 +20,14 @@ export class SttSession {
     this.participant = participant;
     this.onTranscript = onTranscript;
     this.session = new voice.AgentSession({});
+
+    let vad;
+    if (stt.label == "openai.STT") {
+      vad = ctx.proc.userData.vad as silero.VAD;
+    }
+
     this.agent = new voice.Agent({
+      vad: vad,
       instructions: "",
       stt: stt,
     });

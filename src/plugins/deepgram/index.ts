@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Plugin } from '@livekit/agents';
 
-export * from './stt';
+export * from './stt.js';
 
 class DeepgramPlugin extends Plugin {
     constructor() {
