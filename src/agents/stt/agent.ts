@@ -6,7 +6,7 @@ import {
 import { RoomEvent, TrackKind } from '@livekit/rtc-node';
 import type { RemoteTrack, RemoteParticipant, RemoteTrackPublication } from '@livekit/rtc-node';
 import * as silero from '@livekit/agents-plugin-silero';
-import * as helper from './helper.js';
+import * as helper from '../../helper.js';
 import { SttSession } from './session.js';
 import { GetSttProvider } from '../../providers.js';
 
