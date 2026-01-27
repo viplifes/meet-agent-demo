@@ -8,6 +8,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 
+process.on('uncaughtException', function (err) {
+  console.error(`[uncaughtException] time=${(new Date()).getTime()} error=${err}`);
+});
+process.on('unhandledRejection', function (reason, p) {
+  console.error(`[unhandledRejection] time=${(new Date()).getTime()} reason=${reason} promise=`, p);
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

@@ -10,16 +10,12 @@ import {
     AudioByteStream,
     AudioEnergyFilter,
     Future,
-    Task,
     log,
-    mergeFrames,
     stt,
     waitForAbort,
 } from '@livekit/agents';
-import type { AudioFrame } from '@livekit/rtc-node';
+import { AudioFrame } from '@livekit/rtc-node';
 import { WebSocket } from 'ws';
-import { PeriodicCollector } from './_utils.js';
-
 const API_BASE_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 const AUTHORIZATION_HEADER = 'xi-api-key';
 
@@ -59,6 +55,9 @@ export interface STTOptions {
      * @default false
      */
     includeTimestamps?: boolean;
+
+    logKey?: string;
+
 }
 
 
@@ -97,11 +96,15 @@ const defaultSTTOptions: Required<Omit<STTOptions, 'serverVad'>> & {
     tagAudioEvents: true,
     sampleRate: 16000,
     includeTimestamps: false,
+    logKey: "",
+    // serverVad: {
+    //     vadThreshold: 0.2,
+    //     vadSilenceThresholdSecs: 0.3,
+    // },
 };
 
 export class STT extends stt.STT {
     #opts: Required<Omit<STTOptions, 'serverVad'>> & { serverVad?: VADOptions };
-    #logger = log();
     label = 'elevenlabs.STT';
     private abortController = new AbortController();
 
@@ -118,7 +121,6 @@ export class STT extends stt.STT {
                 'ElevenLabs API key is required, either as argument or set ELEVEN_API_KEY environment variable',
             );
         }
-
         this.#opts = mergedOpts;
     }
 
@@ -147,7 +149,6 @@ export class SpeechStream extends stt.SpeechStream {
     #speaking = false;
     #resetWS = new Future();
     #requestId = '';
-    #audioDurationCollector: PeriodicCollector<number>;
     label = 'elevenlabs.SpeechStream';
 
     constructor(
@@ -159,10 +160,6 @@ export class SpeechStream extends stt.SpeechStream {
         this.#opts = opts;
         this.closed = false;
         this.#audioEnergyFilter = new AudioEnergyFilter();
-        this.#audioDurationCollector = new PeriodicCollector(
-            (duration) => this.onAudioDurationReport(duration),
-            { duration: 5.0 },
-        );
     }
 
 
@@ -171,7 +168,7 @@ export class SpeechStream extends stt.SpeechStream {
         const params = {
             model_id: 'scribe_v2_realtime',
             encoding: `pcm_${this.#opts.sampleRate}`,
-            commit_strategy: 'vad',
+            commit_strategy: 'manual', // vad || manual
             vad_silence_threshold_secs: this.#opts.serverVad?.vadSilenceThresholdSecs,
             vad_threshold: this.#opts.serverVad?.vadThreshold,
             minSpeechDurationMs: this.#opts.serverVad?.minSpeechDurationMs,
@@ -188,7 +185,8 @@ export class SpeechStream extends stt.SpeechStream {
                 }
             }
         });
-        this.#logger.debug('Building WebSocket URL: ' + streamURL);
+
+        this.#logger.info(`[elevenlabs.STT] ${this.#opts.logKey} building WebSocket URL: ${streamURL}`);
         return new WebSocket(streamURL, {
             headers: {
                 [AUTHORIZATION_HEADER]: this.#opts.apiKey,
@@ -211,14 +209,10 @@ export class SpeechStream extends stt.SpeechStream {
                     ws.on('close', (code) => reject(`WebSocket returned ${code}`));
                 });
 
-                // setTimeout(() => {
-                //     ws.close(1000);
-                // }, 20000);
-
                 ws.on('message', (msg) => {
                     try {
                         const data = JSON.parse(msg.toString());
-                        this.#logger.debug('Received message: ' + msg.toString());
+                        this.#logger.debug(`[elevenlabs.STT] ${this.#opts.logKey} received message: ${msg.toString()}`);
                         this.#processStreamEvent(data);
                     } catch (err) {
                         this.#logger.error('Error processing message:', err);
@@ -237,18 +231,18 @@ export class SpeechStream extends stt.SpeechStream {
                     retries++;
 
                     this.#logger.warn(
-                        `failed to connect to websocket, retrying in ${delayMs}ms: ${e} (${retries}/${maxRetry})`,
+                        `[elevenlabs.STT] ${this.#opts.logKey} failed to connect to websocket, retrying in ${delayMs}ms: ${e} (${retries}/${maxRetry})`,
                     );
                     await new Promise((resolve) => setTimeout(resolve, delayMs));
                 } else {
-                    this.#logger.warn(
-                        `websocket disconnected, connection is closed: ${e} (inputClosed: ${this.input.closed}, isClosed: ${this.closed})`,
+                    this.#logger.info(
+                        `[elevenlabs.STT] ${this.#opts.logKey} websocket disconnected, connection is closed (inputClosed: ${this.input.closed}, isClosed: ${this.closed})`,
                     );
                 }
 
             } finally {
-                ws.removeAllListeners();
                 ws.close();
+                ws.removeAllListeners();
             }
 
         }
@@ -264,6 +258,7 @@ export class SpeechStream extends stt.SpeechStream {
     async #runWS(ws: WebSocket) {
 
         let closing = false;
+        var flushTimeout: NodeJS.Timeout;
 
 
         // Keepalive ping every 10 seconds
@@ -280,7 +275,7 @@ export class SpeechStream extends stt.SpeechStream {
         // WSS monitor
         ws.once('close', (code, reason) => {
             if (!closing) {
-                this.#logger.error(`WebSocket closed with code ${code}: ${reason}`);
+                this.#logger.error(`[elevenlabs.STT] ${this.#opts.logKey} WebSocket closed with code ${code}: ${reason}`);
             }
             closing = true;
         });
@@ -301,7 +296,6 @@ export class SpeechStream extends stt.SpeechStream {
 
             try {
                 while (!this.closed && !closing) {
-
                     const result = await Promise.race([this.input.next(), abortPromise]);
 
                     if (!result) {
@@ -313,12 +307,12 @@ export class SpeechStream extends stt.SpeechStream {
                     }
 
                     const data = result.value;
-                    // console.log('data', retries, data === SpeechStream.FLUSH_SENTINEL);
 
                     let frames: AudioFrame[];
-                    if (data === SpeechStream.FLUSH_SENTINEL) {
+                    const isFlush = data === SpeechStream.FLUSH_SENTINEL
+                    if (isFlush) {
                         frames = stream.flush();
-                        this.#audioDurationCollector.flush();
+                        // this.#audioDurationCollector.flush();
                     } else if (data.sampleRate === this.#opts.sampleRate && data.channels === 1) {
                         frames = stream.write(data.data.buffer as ArrayBuffer);
                     } else {
@@ -327,28 +321,43 @@ export class SpeechStream extends stt.SpeechStream {
                         );
                     }
 
+                    let sended = false;
                     for (const frame of frames) {
-                        // if (this.#audioEnergyFilter.pushFrame(frame)) {
-                        const frameDuration = frame.samplesPerChannel / frame.sampleRate;
-                        this.#audioDurationCollector.push(frameDuration);
-                        const audioB64 = Buffer.from(frame.data.buffer).toString('base64');
-                        ws.send(
-                            JSON.stringify({
-                                message_type: 'input_audio_chunk',
-                                audio_base_64: audioB64,
-                                commit: false,
-                                sample_rate: this.#opts.sampleRate,
-                            }),
-                        );
-                        // }
+                        if (isFlush || this.#audioEnergyFilter.pushFrame(frame)) {
+                            sended = isFlush ? false : true;
+                            // const frameDuration = frame.samplesPerChannel / frame.sampleRate;
+                            // this.#audioDurationCollector.push(frameDuration);
+                            const audioB64 = Buffer.from(frame.data.buffer).toString('base64');
+                            ws.send(
+                                JSON.stringify({
+                                    message_type: 'input_audio_chunk',
+                                    audio_base_64: audioB64,
+                                    commit: isFlush,
+                                    sample_rate: this.#opts.sampleRate,
+                                }),
+                            );
+
+                        }
                     }
+                    if (sended) {
+                        if (flushTimeout) {
+                            clearTimeout(flushTimeout);
+                        }
+                        flushTimeout = setTimeout(() => {
+                            if (!closing) {
+                                this.#logger.info(`[elevenlabs.STT] ${this.#opts.logKey} FLUSH`);
+                                this.flush();
+                            }
+                        }, 400);
+                    }
+
                 }
             } catch (error) {
                 if (!closing) {
                     this.#logger.error('Error in send task:', error);
                 }
             } finally {
-                this.#logger.debug('Send task finished, closing WebSocket');
+                this.#logger.debug(`[elevenlabs.STT] ${this.#opts.logKey} send task finished, closing WebSocket`);
                 closing = true;
             }
         };
@@ -481,14 +490,5 @@ export class SpeechStream extends stt.SpeechStream {
         }
     };
 
-    private onAudioDurationReport(duration: number) {
-        const usageEvent: stt.SpeechEvent = {
-            type: stt.SpeechEventType.RECOGNITION_USAGE,
-            requestId: this.#requestId,
-            recognitionUsage: {
-                audioDuration: duration,
-            },
-        };
-        this.queue.put(usageEvent);
-    }
+
 }
