@@ -8,6 +8,7 @@ import type { RemoteTrack, RemoteParticipant, RemoteTrackPublication, TrackPubli
 import * as helper from '../../helper.js';
 import { SttSession } from './session.js';
 import { GetSttProvider } from '../../providers.js';
+// import * as simulator from '../../simulator.js';
 
 export default async function STTjob(ctx: JobContext) {
 
@@ -29,11 +30,13 @@ export default async function STTjob(ctx: JobContext) {
     const id = participant.identity;
     const prevSession = sessions[id];
     if (prevSession && prevSession.trackSid == pub.sid) {
+      prevSession.restoreSession();
       logger.info(`[createSession] ${actorId} track ${id} already created for ${participant.identity} - ${participant.name}`);
       return;
     } else if (prevSession) {
       logger.info(`[createSession] ${actorId} track ${id} unsubscribed from prev ${participant.identity} - ${participant.name}`);
-      prevSession.stop();
+      pub.setSubscribed(false);
+      prevSession.delayedStop(() => { });
       delete sessions[id];
     }
 
@@ -59,17 +62,18 @@ export default async function STTjob(ctx: JobContext) {
 
   const removeSession = async (pub: RemoteTrackPublication, participant: Participant) => {
 
-    if (pub.kind !== TrackKind.KIND_AUDIO || pub.source !== TrackSource.SOURCE_MICROPHONE) {
+    if (!pub.sid || pub.kind !== TrackKind.KIND_AUDIO || pub.source !== TrackSource.SOURCE_MICROPHONE) {
       return;
     }
 
     const id = participant.identity;
     const session = sessions[id];
     if (session) {
-      console.info(`[removeSession] track ${id} unsubscribed from ${participant.identity} - ${participant.name}`);
-      delete sessions[id];
-      pub.setSubscribed(false);
-      session.stop();
+      session.delayedStop(() => {
+        console.info(`[removeSession] track ${id} unsubscribed from ${participant.identity} - ${participant.name}`);
+        delete sessions[id];
+        pub.setSubscribed(false);
+      });
     }
   }
 
@@ -148,7 +152,7 @@ export default async function STTjob(ctx: JobContext) {
   ctx.addShutdownCallback(async () => {
     logger.info(`[ShutdownCallback] ${actorId} closed room with ${messages.length} messages`);
     if (messages.length) {
-      //  await simulator.postSttJob(ctx.room.name || "", messages);
+      // await simulator.postSttJob(ctx.room.name || "", messages);
     }
     for (const session of Object.values(sessions)) {
       session.stop();

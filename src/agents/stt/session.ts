@@ -10,6 +10,7 @@ import * as silero from '@livekit/agents-plugin-silero';
 
 export class SttSession {
   #logger = log();
+
   private ctx: JobContext;
   public actorId: string;
   public trackSid: string;
@@ -18,6 +19,7 @@ export class SttSession {
   //
   private session: voice.AgentSession;
   private agent: voice.Agent;
+  private stopTimer?: NodeJS.Timeout;
 
   constructor(ctx: JobContext, actorId: string, trackSid: string, participant: Participant, stt: stt.STT, onTranscript: (text: string) => void) {
     this.ctx = ctx;
@@ -47,6 +49,7 @@ export class SttSession {
       room: this.ctx.room,
       inputOptions: {
         audioEnabled: true,
+        videoEnabled: false,
         textEnabled: false,
         participantIdentity: this.participant.identity,
       },
@@ -67,7 +70,24 @@ export class SttSession {
 
   }
 
+
+  async restoreSession() {
+    if (this.stopTimer) {
+      clearTimeout(this.stopTimer);
+    }
+  }
+
+
+  async delayedStop(callback: () => void) {
+    this.stopTimer = setTimeout(async () => {
+      callback();
+      await this.stop();
+    }, 5000);
+  }
+
   async stop() {
     await this.session.close();
+    this.session.removeAllListeners();
   }
+
 }
